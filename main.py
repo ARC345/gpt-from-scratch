@@ -21,6 +21,7 @@ class settings:
     n_head = 4
     n_layer = 4
     dropout = 0.0
+    comment = "changed ReLU to GELU"
         
 with open('data/tinyshakespeare.txt', 'r', encoding='utf-8') as f:
     text = f.read()
@@ -119,7 +120,7 @@ class FeedFoward(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(settings.n_embd, 4 * settings.n_embd),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(4 * settings.n_embd, settings.n_embd),
             nn.Dropout(settings.dropout),
         )
