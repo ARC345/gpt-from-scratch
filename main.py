@@ -1,6 +1,7 @@
 import os
 import csv
 import json
+import urllib.request
 from datetime import datetime, timezone
 
 import torch
@@ -27,6 +28,7 @@ parser.add_argument('--n_embd', type=int, default=384, help='Embedding dimension
 parser.add_argument('--n_head', type=int, default=6, help='Number of attention heads')
 parser.add_argument('--n_layer', type=int, default=6, help='Number of transformer layers')
 parser.add_argument('--dropout', type=float, default=0.2, help='Dropout rate')
+parser.add_argument('--data', type=str, default='data/tinystories.txt', help='Input file path, URL')
 args = parser.parse_args()
 
 task = Task.init(project_name="gpt-from-scratch", task_name="train_run", reuse_last_task_id=False)
@@ -35,6 +37,12 @@ if args.comment:
     task.set_comment(args.comment)
 else:
     raise ValueError("A comment is required for this run. Please provide one using --comment.")
+
+# Auto-tag task with dataset name
+if args.data.startswith('http'):
+    task.add_tags(['remote_dataset', args.data.split('/')[-1]])
+else:
+    task.add_tags([os.path.basename(args.data)])
 
 if args.profile:
     import cProfile
@@ -59,7 +67,20 @@ class settings:
     dropout = args.dropout
 
         
-with open('data/tinyshakespeare.txt', 'r', encoding='utf-8') as f:
+# Handle data loading
+data_path = args.data
+if data_path.startswith('http://') or data_path.startswith('https://'):
+    url = data_path
+    filename = url.split('/')[-1]
+    data_path = os.path.join('data', filename)
+    if not os.path.exists(data_path):
+        print(f"Downloading {url} to {data_path}...")
+        os.makedirs('data', exist_ok=True)
+        urllib.request.urlretrieve(url, data_path)
+    else:
+        print(f"Using cached file {data_path}")
+
+with open(data_path, 'r', encoding='utf-8') as f:
     text = f.read()
 torch.manual_seed(settings.torch_seed)
 
