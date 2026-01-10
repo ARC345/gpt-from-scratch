@@ -15,7 +15,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--comment', type=str, default='', help='Comment/Description for this run')
 args = parser.parse_args()
 
-task = Task.init(project_name="gpt-from-scratch", task_name="train_run")
+task = Task.init(project_name="gpt-from-scratch", task_name="train_run", reuse_last_task_id=False)
 if args.comment:
     task.set_comment(args.comment)
 else:
@@ -54,8 +54,8 @@ print("tensor->data\n  shape:", data.shape)
 print("  type:", data.dtype)
     
 n = int(settings.train_test_split*len(data))
-train_data = data[:n]
-val_data = data[n:]    
+train_data = data[:n].to(settings.device)
+val_data = data[n:].to(settings.device)
 
 train_data[:settings.block_size+1]
 
@@ -68,7 +68,6 @@ def get_batch(split):
     ix = torch.randint(len(data) - settings.block_size, (settings.batch_size,))
     x = torch.stack([data[i:i+settings.block_size] for i in ix])
     y = torch.stack([data[i+1:i+settings.block_size+1] for i in ix])
-    x, y = x.to(settings.device), y.to(settings.device)
     return x, y
 
 xb, yb = get_batch('train')
@@ -134,7 +133,7 @@ class FeedFoward(nn.Module):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(settings.n_embd, 4 * settings.n_embd),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Linear(4 * settings.n_embd, settings.n_embd),
             nn.Dropout(settings.dropout),
         )
@@ -232,6 +231,8 @@ for iter in range(settings.max_iters):
 
         if losses['val'] < best_val_loss:
             best_val_loss = losses['val']
+            # Save best model
+            torch.save(model.state_dict(), 'best_model.pt')
 
     # sample a batch of data
     xb, yb = get_batch('train')
@@ -260,3 +261,6 @@ print("\nGenerated Text:\n", gen_text)
 task.get_logger().report_text("Generated Sample", gen_text)
 
 print(f"\nRun complete. Best Loss: {best_val_loss:.4f}")
+
+if task:
+    task.upload_artifact('model', 'best_model.pt')

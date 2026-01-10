@@ -55,6 +55,10 @@ def generate_blog_post_from_task(task):
     # But let's try to get the last reported text if possible, or just link to the dashboard.
     dashboard_url = task.get_output_log_web_page()
     
+    # Get Model Artifact
+    model_artifact = task.artifacts.get('model')
+    model_url = model_artifact.get_url() if model_artifact else "N/A"
+    
     content = f"""---
 title: "Experiment: {task_name}"
 date: {filename_date}
@@ -74,6 +78,9 @@ message: "{task.comment or 'No comment provided'}"
 
 ## Loss Curve
 *(Check the dashboard for interactive plots)*
+
+## Artifacts
+**Model Checkpoint**: [Download best_model.pt]({model_url})
 """
 
     post_filename = f"{filename_date}-clearml-{task_id}.md"
