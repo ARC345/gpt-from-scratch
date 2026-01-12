@@ -21,8 +21,9 @@ class RotaryPositionalEmbedding(nn.Module):
         inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2).float() / dim))
         t = torch.arange(max_seq_len, dtype=torch.float)
         freqs = torch.outer(t, inv_freq)
-        self.register_buffer("cos", freqs.cos())
-        self.register_buffer("sin", freqs.sin())
+        emb = torch.cat((freqs, freqs), dim=-1)
+        self.register_buffer("cos", emb.cos())
+        self.register_buffer("sin", emb.sin())
 
     def forward(self, x, seq_len=None):
         # x: [batch_size, seq_len, dim]
