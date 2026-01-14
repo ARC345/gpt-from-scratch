@@ -3,6 +3,7 @@ from typing import Optional
 
 @dataclass
 class GPTConfig:
+
     block_size: int = 128
     vocab_size: int = 50304 # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
     n_layer: int = 6
@@ -19,12 +20,9 @@ class GPTConfig:
     beta1: float = 0.9
     beta2: float = 0.95
     grad_clip: float = 1.0
-    
-    # Architecture params
-    activation: str = 'gelu'
-    norm_type: str = 'layer' # layer, rms
-    pos_emb: str = 'absolute' # absolute, rope
+    eval_interval: int = 100
     
     # System
     device: str = 'cuda'
     compile: bool = False
+    seed: int = 1337

@@ -1,8 +1,13 @@
+
 import math
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from config import GPTConfig
+
+# -----------------------------------------------------------------------------
+# Primitives
+# -----------------------------------------------------------------------------
 
 class RMSNorm(nn.Module):
     def __init__(self, dim, eps=1e-5):
@@ -35,7 +40,12 @@ def apply_rope(x, cos, sin):
     # x: [batch_size, seq_len, head_dim]
     head_dim = x.shape[-1]
     x_rot = torch.cat([-x[..., head_dim//2:], x[..., :head_dim//2]], dim=-1)
+    # Note: broadcasting handled by caller or shapes must match
     return (x * cos) + (x_rot * sin)
+
+# -----------------------------------------------------------------------------
+# Standard GPT Implementation
+# -----------------------------------------------------------------------------
 
 class Head(nn.Module):
     """ one head of self-attention """
@@ -59,8 +69,6 @@ class Head(nn.Module):
         
         if rot_emb is not None:
              cos, sin = rot_emb
-             # q,k are (B,T,HeadSize). cos,sin are (T, Dim).
-             # We need to reshape for broadcasting (1, seq_len, dim)
              cos = cos.unsqueeze(0)
              sin = sin.unsqueeze(0)
              q = apply_rope(q, cos, sin)
@@ -87,17 +95,26 @@ class MultiHeadAttention(nn.Module):
 class FeedFoward(nn.Module):
     """ a simple linear layer followed by a non-linearity """
 
+class FeedFoward(nn.Module):
+    """ a simple linear layer followed by a non-linearity """
+
     def __init__(self, config: GPTConfig):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(config.n_embd, 4 * config.n_embd),
-            nn.ReLU() if config.activation == 'relu' else nn.GELU(),
+            self.build_activation(),
             nn.Linear(4 * config.n_embd, config.n_embd),
             nn.Dropout(config.dropout),
         )
 
+    def build_activation(self):
+        return nn.GELU()
+
     def forward(self, x):
         return self.net(x)
+
+class Block(nn.Module):
+    """ Transformer block: communication followed by computation """
 
 class Block(nn.Module):
     """ Transformer block: communication followed by computation """
@@ -106,13 +123,15 @@ class Block(nn.Module):
         super().__init__()
         self.config = config
         self.sa = MultiHeadAttention(config)
-        self.ffwd = FeedFoward(config)
-        if config.norm_type == 'rms':
-            self.ln1 = RMSNorm(config.n_embd)
-            self.ln2 = RMSNorm(config.n_embd)
-        else:
-            self.ln1 = nn.LayerNorm(config.n_embd)
-            self.ln2 = nn.LayerNorm(config.n_embd)
+        self.ffwd = self.build_ffwd(config)
+        self.ln1 = self.build_norm(config.n_embd)
+        self.ln2 = self.build_norm(config.n_embd)
+        
+    def build_ffwd(self, config):
+        return FeedFoward(config)
+        
+    def build_norm(self, dim):
+        return nn.LayerNorm(dim)
 
     def forward(self, x, rot_emb=None):
         x = x + self.sa(self.ln1(x), rot_emb=rot_emb)
@@ -127,51 +146,45 @@ class GPT(nn.Module):
         
         self.token_embedding_table = nn.Embedding(config.vocab_size, config.n_embd)
         
-        if config.pos_emb == 'absolute':
-             self.position_embedding_table = nn.Embedding(config.block_size, config.n_embd)
-        else:
-             self.position_embedding_table = None
-             head_size = config.n_embd // config.n_head
-             self.rope = RotaryPositionalEmbedding(head_size, max_seq_len=config.block_size)
+        self.position_embedding_table = nn.Embedding(config.block_size, config.n_embd)
 
-        self.blocks = nn.ModuleList([Block(config) for _ in range(config.n_layer)])
+        self.blocks = nn.ModuleList([self.build_block(config) for _ in range(config.n_layer)])
         
-        if config.norm_type == 'rms':
-            self.ln_f = RMSNorm(config.n_embd)
-        else:
-            self.ln_f = nn.LayerNorm(config.n_embd)
+        self.ln_f = self.build_norm(config.n_embd)
             
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size)
 
         self.apply(self._init_weights)
+        
+    def build_block(self, config):
+        return Block(config)
+        
+    def build_norm(self, dim):
+        return nn.LayerNorm(dim)
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
             if module.bias is not None:
                 torch.nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
+    def forward_embeddings(self, idx, device):
         B, T = idx.shape
-        device = idx.device
-
         # idx and targets are both (B,T) tensor of integers
         tok_emb = self.token_embedding_table(idx) # (B,T,C)
         x = tok_emb
         
-        rot_emb = None
-        if self.config.pos_emb == 'absolute':
-            pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T,C)
-            x = x + pos_emb # (B,T,C)
-        else:
-            # RoPE
-            rot_emb = self.rope(x, seq_len=T)
+        pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T,C)
+        x = x + pos_emb # (B,T,C)
+        
+        return x
 
+    def forward_blocks(self, x):
         for block in self.blocks:
-            x = block(x, rot_emb=rot_emb) # (B,T,C)
-            
+            x = block(x) # (B,T,C)
+        return x
+
+    def forward_head(self, x, targets=None):
         x = self.ln_f(x) # (B,T,C)
         logits = self.lm_head(x) # (B,T,vocab_size)
 
@@ -182,7 +195,13 @@ class GPT(nn.Module):
             logits = logits.view(B*T, C)
             targets = targets.view(B*T)
             loss = F.cross_entropy(logits, targets)
+        return logits, loss
 
+    def forward(self, idx, targets=None):
+        device = idx.device
+        x = self.forward_embeddings(idx, device)
+        x = self.forward_blocks(x)
+        logits, loss = self.forward_head(x, targets)
         return logits, loss
 
     def generate(self, idx, max_new_tokens):
@@ -201,3 +220,68 @@ class GPT(nn.Module):
             # append sampled index to the running sequence
             idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
         return idx
+
+# -----------------------------------------------------------------------------
+# EXPERIMENT CLASSES
+# -----------------------------------------------------------------------------
+
+# --- ReLU Experiment ---
+class ReluFeedForward(FeedFoward):
+    def build_activation(self):
+        return nn.ReLU()
+
+class ReluBlock(Block):
+    def build_ffwd(self, config):
+        return ReluFeedForward(config)
+
+class ReluGPT(GPT):
+    def build_block(self, config):
+        return ReluBlock(config)
+
+# --- RMSNorm Experiment ---
+class RmsBlock(Block):
+    def build_norm(self, dim):
+        return RMSNorm(dim)
+
+class RmsGPT(GPT):
+    def build_norm(self, dim):
+        return RMSNorm(dim)
+        
+    def build_block(self, config):
+        return RmsBlock(config)
+
+# --- RoPE Experiment ---
+class RopeGPT(GPT):
+    def __init__(self, config: GPTConfig):
+        super().__init__(config)
+        # Remove absolute position embeddings
+        self.position_embedding_table = None
+        # Add RoPE
+        head_size = config.n_embd // config.n_head
+        self.rope = RotaryPositionalEmbedding(head_size, max_seq_len=config.block_size)
+
+    def forward_embeddings(self, idx, device):
+        # RoPE does not add position embeddings to the input embeddings
+        # It returns rotational embeddings to be applied in attention
+        B, T = idx.shape
+        x = self.token_embedding_table(idx)
+        
+        rot_emb = self.rope(x, seq_len=T)
+        return x, rot_emb
+
+    def forward_blocks(self, x, rot_emb=None):
+        for block in self.blocks:
+            x = block(x, rot_emb=rot_emb)
+        return x
+
+    def forward(self, idx, targets=None):
+        device = idx.device
+        x, rot_emb = self.forward_embeddings(idx, device)
+        x = self.forward_blocks(x, rot_emb=rot_emb)
+        logits, loss = self.forward_head(x, targets)
+        return logits, loss
+
+# --- GELU (Default) ---
+# Since Base GPT uses GELU/LayerNorm, we can just alias it or subclass for naming
+class GeluGPT(GPT):
+    pass
