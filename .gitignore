@@ -13,3 +13,5 @@ experiment_metrics.csv
 experiment_meta.jsonl
 experiment_logs.jsonl
 *.pt
+ignored/
+runs/

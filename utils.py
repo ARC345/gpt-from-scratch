@@ -33,7 +33,16 @@ class ExperimentLogger:
         file_exists = os.path.exists(self.metrics_file)
         
         if not self.csv_headers:
-            self.csv_headers = list(metrics.keys())
+            if file_exists:
+                with open(self.metrics_file, 'r', encoding='utf-8') as f:
+                    reader = csv.reader(f)
+                    try:
+                        self.csv_headers = next(reader)
+                    except StopIteration:
+                        # File is empty
+                        self.csv_headers = list(metrics.keys())
+            else:
+                self.csv_headers = list(metrics.keys())
         
         with open(self.metrics_file, 'a', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=self.csv_headers)
