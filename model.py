@@ -50,13 +50,14 @@ def apply_rope(x, cos, sin):
 class Head(nn.Module):
     """ one head of self-attention """
 
-    def __init__(self, config: GPTConfig):
+    def __init__(self, config: GPTConfig, embedding_dim: int = None):
         super().__init__()
         self.config = config
-        head_size = config.n_embd // config.n_head
-        self.key = nn.Linear(config.n_embd, head_size, bias=False)
-        self.query = nn.Linear(config.n_embd, head_size, bias=False)
-        self.value = nn.Linear(config.n_embd, head_size, bias=False)
+        dim = embedding_dim if embedding_dim is not None else config.n_embd
+        head_size = dim // config.n_head
+        self.key = nn.Linear(dim, head_size, bias=False)
+        self.query = nn.Linear(dim, head_size, bias=False)
+        self.value = nn.Linear(dim, head_size, bias=False)
         self.register_buffer('tril', torch.tril(torch.ones(config.block_size, config.block_size)))
 
         self.dropout = nn.Dropout(config.dropout)
@@ -81,10 +82,11 @@ class Head(nn.Module):
 class MultiHeadAttention(nn.Module):
     """ multiple heads of self-attention in parallel """
 
-    def __init__(self, config: GPTConfig):
+    def __init__(self, config: GPTConfig, embedding_dim: int = None):
         super().__init__()
-        self.heads = nn.ModuleList([Head(config) for _ in range(config.n_head)])
-        self.proj = nn.Linear(config.n_embd, config.n_embd)
+        dim = embedding_dim if embedding_dim is not None else config.n_embd
+        self.heads = nn.ModuleList([Head(config, embedding_dim=dim) for _ in range(config.n_head)])
+        self.proj = nn.Linear(dim, dim)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x, rot_emb=None):
@@ -98,12 +100,13 @@ class FeedFoward(nn.Module):
 class FeedFoward(nn.Module):
     """ a simple linear layer followed by a non-linearity """
 
-    def __init__(self, config: GPTConfig):
+    def __init__(self, config: GPTConfig, embedding_dim: int = None):
         super().__init__()
+        dim = embedding_dim if embedding_dim is not None else config.n_embd
         self.net = nn.Sequential(
-            nn.Linear(config.n_embd, 4 * config.n_embd),
+            nn.Linear(dim, 4 * dim),
             self.build_activation(),
-            nn.Linear(4 * config.n_embd, config.n_embd),
+            nn.Linear(4 * dim, dim),
             nn.Dropout(config.dropout),
         )
 
@@ -119,16 +122,17 @@ class Block(nn.Module):
 class Block(nn.Module):
     """ Transformer block: communication followed by computation """
 
-    def __init__(self, config: GPTConfig):
+    def __init__(self, config: GPTConfig, embedding_dim: int = None):
         super().__init__()
         self.config = config
-        self.sa = MultiHeadAttention(config)
-        self.ffwd = self.build_ffwd(config)
-        self.ln1 = self.build_norm(config.n_embd)
-        self.ln2 = self.build_norm(config.n_embd)
+        dim = embedding_dim if embedding_dim is not None else config.n_embd
+        self.sa = MultiHeadAttention(config, embedding_dim=dim)
+        self.ffwd = self.build_ffwd(config, embedding_dim=dim)
+        self.ln1 = self.build_norm(dim)
+        self.ln2 = self.build_norm(dim)
         
-    def build_ffwd(self, config):
-        return FeedFoward(config)
+    def build_ffwd(self, config, embedding_dim=None):
+        return FeedFoward(config, embedding_dim=embedding_dim)
         
     def build_norm(self, dim):
         return nn.LayerNorm(dim)
@@ -285,3 +289,67 @@ class RopeGPT(GPT):
 # Since Base GPT uses GELU/LayerNorm, we can just alias it or subclass for naming
 class GeluGPT(GPT):
     pass
+
+class ReasoningGPT(GPT):
+    """
+    GPT variant supporting variable layer dimensions (bottleneck).
+    Inserts linear projections between layers if dimensions do not match.
+    """
+    def __init__(self, config: GPTConfig):
+        super().__init__(config)
+        
+        # Override blocks if layer_dims is present
+        if config.layer_dims is not None:
+            assert len(config.layer_dims) == config.n_layer, "layer_dims must match n_layer"
+            
+            # Re-initialize blocks with custom dimensions
+            self.blocks = nn.ModuleList()
+            self.projections = nn.ModuleList()
+            
+            # Input projection if first layer dim != n_embd (though n_embd usually matches first layer)
+            # config.n_embd is used for embedding table. 
+            # If layer_dims[0] != config.n_embd, needs projection?
+            # Start with standard n_embd.
+            
+            current_dim = config.n_embd
+            
+            for i, dim in enumerate(config.layer_dims):
+                # Check if we need projection BEFORE the block
+                # However, spec says: "Apply after layer i output, before layer i+1 input"
+                # For first layer, we assume it matches n_embd or we project.
+                
+                if current_dim != dim:
+                    self.projections.append(nn.Linear(current_dim, dim))
+                else:
+                    self.projections.append(nn.Identity())
+                
+                self.blocks.append(self.build_block(config, embedding_dim=dim))
+                current_dim = dim
+                
+            # Final projection to n_embd (for lm_head) or modify lm_head input dim?
+            # lm_head expects config.n_embd input if we use self.lm_head from super.
+            # But super.__init__ created self.lm_head with n_embd.
+            # If the last layer dim != n_embd, we need to project back or replace lm_head.
+            # Let's project back to n_embd for simplicity and consistency with ln_f.
+            
+            if current_dim != config.n_embd:
+                self.final_proj = nn.Linear(current_dim, config.n_embd)
+            else:
+                self.final_proj = nn.Identity()
+                
+            # Re-init ln_f to match n_embd (already done in super, but input to it will be projected)
+            
+    def build_block(self, config, embedding_dim=None):
+        return Block(config, embedding_dim=embedding_dim)
+
+    def forward_blocks(self, x):
+        # We need to handle projections + blocks
+        if self.config.layer_dims is None:
+            return super().forward_blocks(x)
+            
+        for proj, block in zip(self.projections, self.blocks):
+            x = proj(x)
+            x = block(x)
+            
+        x = self.final_proj(x)
+        return x

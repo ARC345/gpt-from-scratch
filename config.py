@@ -11,6 +11,7 @@ class GPTConfig:
     n_embd: int = 384
     dropout: float = 0.2
     bias: bool = False # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better.
+    layer_dims: Optional[list[int]] = None # Optional list of dimensions for each layer
     
     # Training params
     batch_size: int = 32
